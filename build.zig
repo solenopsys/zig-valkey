@@ -38,23 +38,20 @@ fn getTargetParts(target: std.Build.ResolvedTarget) TargetParts {
         }),
     };
 
-    return .{
-        .arch = arch,
-        .libc = libc,
-    };
+    return .{ .arch = arch, .libc = libc };
 }
 
-fn addValkeyServerBuild(
+fn prepareValkeySource(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
-    exe_name: []const u8,
-) *std.Build.Step.InstallFile {
+) struct {
+    step: *std.Build.Step.Run,
+    build_dir: []const u8,
+    source_dir: []const u8,
+    source_src_dir: []const u8,
+} {
     const target_str = build_utils.getTargetString(target);
-    const target_parts = getTargetParts(target);
-    const target_triple = b.fmt("{s}-linux-{s}", .{ target_parts.arch, target_parts.libc });
-    const optimize_flag = getMakeOptimize(optimize);
-
     const build_dir = b.fmt(".zig-cache/valkey/{s}/{s}", .{ target_str, @tagName(optimize) });
     const source_dir = b.fmt("{s}/source", .{build_dir});
     const source_src_dir = b.fmt("{s}/src", .{source_dir});
@@ -69,11 +66,31 @@ fn addValkeyServerBuild(
     });
     prepare.setName(b.fmt("prepare valkey ({s})", .{target_str}));
 
+    return .{
+        .step = prepare,
+        .build_dir = build_dir,
+        .source_dir = source_dir,
+        .source_src_dir = source_src_dir,
+    };
+}
+
+fn addValkeyStaticBuild(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    source_src_dir: []const u8,
+    prepare_step: *std.Build.Step,
+) *std.Build.Step.Run {
+    const target_str = build_utils.getTargetString(target);
+    const target_parts = getTargetParts(target);
+    const target_triple = b.fmt("{s}-linux-{s}", .{ target_parts.arch, target_parts.libc });
+    const optimize_flag = getMakeOptimize(optimize);
+
     const make_cmd = b.addSystemCommand(&[_][]const u8{
         "make",
         "-C",
         source_src_dir,
-        "valkey-server",
+        "libvalkey.a",
         "-j",
         b.fmt("CC={s} cc -target {s}", .{ b.graph.zig_exe, target_triple }),
         b.fmt("AR={s} ar", .{b.graph.zig_exe}),
@@ -81,25 +98,64 @@ fn addValkeyServerBuild(
         "MALLOC=libc",
         "BUILD_TLS=no",
         "BUILD_RDMA=no",
+        "BUILD_LUA=no",
         "USE_SYSTEMD=no",
         "USE_LIBBACKTRACE=no",
-        "CFLAGS=-fno-sanitize=undefined",
+        "CFLAGS=-fPIC -fno-sanitize=undefined -Dmain=valkey_embedded_main",
         "OPTIMIZATION=",
         b.fmt("OPT={s}", .{optimize_flag}),
         "DEBUG=",
     });
-    make_cmd.setName(b.fmt("build valkey-server ({s})", .{target_str}));
-    make_cmd.step.dependOn(&prepare.step);
+    make_cmd.setName(b.fmt("build embedded valkey ({s})", .{target_str}));
+    make_cmd.step.dependOn(prepare_step);
 
-    const built_server = b.fmt("{s}/valkey-server", .{source_src_dir});
-    const install_server = b.addInstallFileWithDir(
-        .{ .cwd_relative = built_server },
-        .bin,
-        exe_name,
-    );
-    install_server.step.dependOn(&make_cmd.step);
+    return make_cmd;
+}
 
-    return install_server;
+fn addValkeyWrapperLib(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    lib_name: []const u8,
+) *std.Build.Step.Compile {
+    const prepared = prepareValkeySource(b, target, optimize);
+    const make_cmd = addValkeyStaticBuild(b, target, optimize, prepared.source_src_dir, &prepared.step.step);
+
+    const lib = b.addLibrary(.{
+        .name = lib_name,
+        .linkage = .dynamic,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    lib.step.dependOn(&make_cmd.step);
+
+    lib.root_module.link_libc = true;
+    lib.root_module.addIncludePath(b.path("include"));
+    lib.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/src", .{prepared.source_dir}) });
+    lib.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/deps/libvalkey/include", .{prepared.source_dir}) });
+    lib.root_module.addCSourceFile(.{
+        .file = b.path("src/valkey_wrapper.c"),
+        .flags = &[_][]const u8{
+            "-std=c11",
+            "-fPIC",
+            "-fvisibility=hidden",
+            "-D_DEFAULT_SOURCE",
+            "-Wno-error",
+        },
+    });
+
+    lib.root_module.addObjectFile(.{ .cwd_relative = b.fmt("{s}/libvalkey.a", .{prepared.source_src_dir}) });
+    lib.root_module.addObjectFile(.{ .cwd_relative = b.fmt("{s}/deps/libvalkey/lib/libvalkey.a", .{prepared.source_dir}) });
+    lib.root_module.addObjectFile(.{ .cwd_relative = b.fmt("{s}/deps/hdr_histogram/libhdrhistogram.a", .{prepared.source_dir}) });
+    lib.root_module.addObjectFile(.{ .cwd_relative = b.fmt("{s}/deps/fpconv/libfpconv.a", .{prepared.source_dir}) });
+    lib.root_module.linkSystemLibrary("dl", .{});
+    lib.root_module.linkSystemLibrary("pthread", .{});
+    lib.root_module.linkSystemLibrary("rt", .{});
+
+    return lib;
 }
 
 fn buildForTarget(
@@ -111,17 +167,18 @@ fn buildForTarget(
     json_step: *build_utils.WriteJsonStep,
 ) void {
     const target_str = build_utils.getTargetString(target);
-    const exe_name = build_utils.getExeName(std.heap.page_allocator, "valkey-server", target_str);
-    const install_server = addValkeyServerBuild(b, target, optimize, exe_name);
+    const lib_name = build_utils.getLibName(std.heap.page_allocator, "valkey", target_str);
+    const lib = addValkeyWrapperLib(b, target, optimize, lib_name);
+    const install = b.addInstallArtifact(lib, .{});
 
-    const hash_step = build_utils.HashAndMoveExeStep.create(
+    const hash_step = build_utils.HashAndMoveStep.create(
         b,
-        exe_name,
+        lib_name,
         target_str,
         artifacts_dir,
         hashes,
     );
-    hash_step.step.dependOn(&install_server.step);
+    hash_step.step.dependOn(&install.step);
 
     json_step.step.dependOn(&hash_step.step);
 }
@@ -145,7 +202,8 @@ pub fn build(b: *std.Build) void {
         b.default_step.dependOn(&json_step.step);
     } else {
         const target = b.standardTargetOptions(.{});
-        const install_server = addValkeyServerBuild(b, target, optimize, "valkey-server");
-        b.getInstallStep().dependOn(&install_server.step);
+        const lib = addValkeyWrapperLib(b, target, optimize, "valkey");
+        b.installArtifact(lib);
+        b.installFile("include/valkey_wrapper.h", "include/valkey_wrapper.h");
     }
 }
