@@ -18,6 +18,7 @@ static pthread_t g_thread;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static int g_started = 0;
 static int g_thread_active = 0;
+static int g_thread_joinable = 0;
 static char g_host[128] = "127.0.0.1";
 static int g_port = 6379;
 static char g_last_error[512] = "";
@@ -123,12 +124,19 @@ int valkey_wrapper_start(const char *host, uint16_t port, const char *data_dir) 
         return VALKEY_WRAPPER_ERR;
     }
 
+    const char *requested_host = (host && host[0]) ? host : "127.0.0.1";
+
     pthread_mutex_lock(&g_lock);
-    if (g_started) {
+    if (g_started || g_thread_active || g_thread_joinable) {
+        int same_config = strcmp(g_host, requested_host) == 0 && g_port == (int)port;
         pthread_mutex_unlock(&g_lock);
-        return VALKEY_WRAPPER_OK;
+        if (same_config && valkey_wrapper_ping() == VALKEY_WRAPPER_OK) {
+            return VALKEY_WRAPPER_OK;
+        }
+        set_error("valkey server is already active or still stopping");
+        return VALKEY_WRAPPER_ERR;
     }
-    snprintf(g_host, sizeof(g_host), "%s", (host && host[0]) ? host : "127.0.0.1");
+    snprintf(g_host, sizeof(g_host), "%s", requested_host);
     g_port = (int)port;
     pthread_mutex_unlock(&g_lock);
 
@@ -143,11 +151,11 @@ int valkey_wrapper_start(const char *host, uint16_t port, const char *data_dir) 
         set_error_fmt("pthread_create failed", strerror(rc));
         return VALKEY_WRAPPER_ERR;
     }
-    pthread_detach(g_thread);
 
     pthread_mutex_lock(&g_lock);
     g_started = 1;
     g_thread_active = 1;
+    g_thread_joinable = 1;
     pthread_mutex_unlock(&g_lock);
 
     for (int i = 0; i < 200; i++) {
@@ -162,10 +170,11 @@ int valkey_wrapper_start(const char *host, uint16_t port, const char *data_dir) 
 int valkey_wrapper_stop(void) {
     pthread_mutex_lock(&g_lock);
     int active = g_thread_active;
+    int joinable = g_thread_joinable;
     pthread_mutex_unlock(&g_lock);
-    if (!active) return VALKEY_WRAPPER_OK;
+    if (!active && !joinable) return VALKEY_WRAPPER_OK;
 
-    if (server.el != NULL) {
+    if (active && server.el != NULL) {
         aeStop(server.el);
     }
 
@@ -177,9 +186,23 @@ int valkey_wrapper_stop(void) {
         usleep(10000);
     }
 
+    if (active) {
+        set_error("valkey did not stop before timeout");
+        return VALKEY_WRAPPER_ERR;
+    }
+
+    if (joinable) {
+        int rc = pthread_join(g_thread, NULL);
+        if (rc != 0) {
+            set_error_fmt("pthread_join failed", strerror(rc));
+            return VALKEY_WRAPPER_ERR;
+        }
+    }
+
     pthread_mutex_lock(&g_lock);
-    g_thread_active = 0;
     g_started = 0;
+    g_thread_active = 0;
+    g_thread_joinable = 0;
     pthread_mutex_unlock(&g_lock);
     return VALKEY_WRAPPER_OK;
 }
