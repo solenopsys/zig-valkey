@@ -184,7 +184,7 @@ fn buildForTarget(
 }
 
 pub fn build(b: *std.Build) void {
-    const optimize = b.standardOptimizeOption(.{});
+    const optimize = b.option(std.builtin.OptimizeMode, "optimize", "Prioritize performance, safety, or binary size") orelse .ReleaseFast;
     const artifacts_dir = "../../artifacts/libs";
     const json_path = "current.json";
 

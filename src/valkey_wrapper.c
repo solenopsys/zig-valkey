@@ -25,7 +25,6 @@ static char g_last_error[512] = "";
 typedef struct {
     char host[128];
     char port[16];
-    char dir[1024];
 } server_args_t;
 static server_args_t g_server_args;
 
@@ -53,8 +52,6 @@ static void *server_thread_main(void *opaque) {
         cfg->host,
         (char *)"--port",
         cfg->port,
-        (char *)"--dir",
-        cfg->dir,
         (char *)"--save",
         (char *)"",
         (char *)"--appendonly",
@@ -67,6 +64,8 @@ static void *server_thread_main(void *opaque) {
         (char *)"no",
         (char *)"--logfile",
         (char *)"",
+        (char *)"--loglevel",
+        (char *)"warning",
         (char *)"--set-proc-title",
         (char *)"no",
         (char *)"--databases",
@@ -119,10 +118,7 @@ int valkey_wrapper_ping(void) {
 }
 
 int valkey_wrapper_start(const char *host, uint16_t port, const char *data_dir) {
-    if (data_dir == NULL || data_dir[0] == '\0') {
-        set_error("data_dir is required");
-        return VALKEY_WRAPPER_ERR;
-    }
+    (void)data_dir;
 
     const char *requested_host = (host && host[0]) ? host : "127.0.0.1";
 
@@ -144,8 +140,6 @@ int valkey_wrapper_start(const char *host, uint16_t port, const char *data_dir) 
     memset(cfg, 0, sizeof(*cfg));
     snprintf(cfg->host, sizeof(cfg->host), "%s", g_host);
     snprintf(cfg->port, sizeof(cfg->port), "%u", (unsigned int)port);
-    snprintf(cfg->dir, sizeof(cfg->dir), "%s", data_dir);
-
     int rc = pthread_create(&g_thread, NULL, server_thread_main, cfg);
     if (rc != 0) {
         set_error_fmt("pthread_create failed", strerror(rc));
