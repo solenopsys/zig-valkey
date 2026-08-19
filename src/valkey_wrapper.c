@@ -25,6 +25,7 @@ static char g_last_error[512] = "";
 typedef struct {
     char host[128];
     char port[16];
+    char maxmemory[16];
 } server_args_t;
 static server_args_t g_server_args;
 
@@ -70,6 +71,10 @@ static void *server_thread_main(void *opaque) {
         (char *)"no",
         (char *)"--databases",
         (char *)"1",
+        (char *)"--maxmemory",
+        cfg->maxmemory,
+        (char *)"--maxmemory-policy",
+        (char *)"allkeys-lru",
         NULL,
     };
     int argc = (int)((sizeof(argv) / sizeof(argv[0])) - 1);
@@ -117,7 +122,45 @@ int valkey_wrapper_ping(void) {
     return VALKEY_WRAPPER_OK;
 }
 
-int valkey_wrapper_start(const char *host, uint16_t port, const char *data_dir) {
+int valkey_wrapper_used_memory(uint64_t *out_bytes) {
+    if (out_bytes == NULL) {
+        set_error("used memory output is required");
+        return VALKEY_WRAPPER_ERR;
+    }
+    *out_bytes = 0;
+
+    valkeyContext *ctx = connect_ctx();
+    if (ctx == NULL) return VALKEY_WRAPPER_ERR;
+    valkeyReply *reply = (valkeyReply *)valkeyCommand(ctx, "INFO memory");
+    if (reply == NULL) {
+        set_error_fmt("valkey INFO memory failed", ctx->errstr);
+        valkeyFree(ctx);
+        return VALKEY_WRAPPER_ERR;
+    }
+
+    int ok = 0;
+    if (reply->type == VALKEY_REPLY_STRING && reply->str != NULL) {
+        const char *value = strstr(reply->str, "used_memory:");
+        if (value != NULL) {
+            value += strlen("used_memory:");
+            char *end = NULL;
+            unsigned long long parsed = strtoull(value, &end, 10);
+            if (end != value) {
+                *out_bytes = (uint64_t)parsed;
+                ok = 1;
+            }
+        }
+    }
+    freeReplyObject(reply);
+    valkeyFree(ctx);
+    if (!ok) {
+        set_error("valkey INFO memory returned no used_memory");
+        return VALKEY_WRAPPER_ERR;
+    }
+    return VALKEY_WRAPPER_OK;
+}
+
+int valkey_wrapper_start(const char *host, uint16_t port, const char *data_dir, uint32_t max_memory_mib) {
     (void)data_dir;
 
     const char *requested_host = (host && host[0]) ? host : "127.0.0.1";
@@ -140,6 +183,7 @@ int valkey_wrapper_start(const char *host, uint16_t port, const char *data_dir) 
     memset(cfg, 0, sizeof(*cfg));
     snprintf(cfg->host, sizeof(cfg->host), "%s", g_host);
     snprintf(cfg->port, sizeof(cfg->port), "%u", (unsigned int)port);
+    snprintf(cfg->maxmemory, sizeof(cfg->maxmemory), "%umb", max_memory_mib ? max_memory_mib : 128);
     int rc = pthread_create(&g_thread, NULL, server_thread_main, cfg);
     if (rc != 0) {
         set_error_fmt("pthread_create failed", strerror(rc));
@@ -227,6 +271,29 @@ int valkey_wrapper_put(const uint8_t *key, size_t key_len, const uint8_t *value,
     valkeyFree(ctx);
     if (!ok) {
         set_error("valkey set returned unexpected reply");
+        return VALKEY_WRAPPER_ERR;
+    }
+    return VALKEY_WRAPPER_OK;
+}
+
+int valkey_wrapper_put_expiring(const uint8_t *key, size_t key_len, const uint8_t *value, size_t value_len, uint32_t ttl_seconds) {
+    if (key == NULL || key_len == 0 || value == NULL || ttl_seconds == 0) {
+        set_error("invalid expiring put arguments");
+        return VALKEY_WRAPPER_ERR;
+    }
+    valkeyContext *ctx = connect_ctx();
+    if (ctx == NULL) return VALKEY_WRAPPER_ERR;
+    valkeyReply *reply = (valkeyReply *)valkeyCommand(ctx, "SET %b %b EX %u", key, key_len, value, value_len, ttl_seconds);
+    if (reply == NULL) {
+        set_error_fmt("valkey expiring set failed", ctx->errstr);
+        valkeyFree(ctx);
+        return VALKEY_WRAPPER_ERR;
+    }
+    int ok = (reply->type == VALKEY_REPLY_STATUS && reply->str != NULL && strcmp(reply->str, "OK") == 0);
+    freeReplyObject(reply);
+    valkeyFree(ctx);
+    if (!ok) {
+        set_error("valkey expiring set returned unexpected reply");
         return VALKEY_WRAPPER_ERR;
     }
     return VALKEY_WRAPPER_OK;
