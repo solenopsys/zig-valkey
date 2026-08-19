@@ -151,6 +151,7 @@ fn addValkeyWrapperLib(
     lib.root_module.addObjectFile(.{ .cwd_relative = b.fmt("{s}/deps/libvalkey/lib/libvalkey.a", .{prepared.source_dir}) });
     lib.root_module.addObjectFile(.{ .cwd_relative = b.fmt("{s}/deps/hdr_histogram/libhdrhistogram.a", .{prepared.source_dir}) });
     lib.root_module.addObjectFile(.{ .cwd_relative = b.fmt("{s}/deps/fpconv/libfpconv.a", .{prepared.source_dir}) });
+    lib.root_module.addObjectFile(.{ .cwd_relative = b.fmt("{s}/deps/lz4/liblz4.a", .{prepared.source_dir}) });
     lib.root_module.linkSystemLibrary("dl", .{});
     lib.root_module.linkSystemLibrary("pthread", .{});
     lib.root_module.linkSystemLibrary("rt", .{});
