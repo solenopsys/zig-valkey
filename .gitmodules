@@ -1,3 +1,3 @@
-[submodule "vendor/valkey"]
-	path = vendor/valkey
+[submodule "vendor/valkey-vendor"]
+	path = vendor/valkey-vendor
 	url = https://github.com/valkey-io/valkey.git

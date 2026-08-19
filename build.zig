@@ -59,7 +59,7 @@ fn prepareValkeySource(
     const prepare = b.addSystemCommand(&[_][]const u8{
         "sh",
         "-c",
-        "rm -rf \"$2\" && mkdir -p \"$1\" && cp -a vendor/valkey \"$2\" && sed -i 's/#define HAVE_X86_SIMD 1/#define HAVE_X86_SIMD 0/' \"$2/src/config.h\"",
+        "rm -rf \"$2\" && mkdir -p \"$1\" && cp -a vendor/valkey-vendor \"$2\" && sed -i 's/#define HAVE_X86_SIMD 1/#define HAVE_X86_SIMD 0/' \"$2/src/config.h\"",
         "prepare-valkey",
         build_dir,
         source_dir,
